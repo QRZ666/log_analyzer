@@ -1,0 +1,38 @@
+attack_keywords = [
+    "union",
+    "select",
+    "or 1=1",
+    "<script>",
+    "alert(",
+    "sqlmap"
+]
+
+ip_count = {}
+
+with open("access.log", "r", encoding="utf-8") as file:
+    for line in file:
+
+        line_lower = line.lower()
+
+        for keyword in attack_keywords:
+
+            if keyword in line_lower:
+
+                ip = line.split(" ")[0]
+
+                if ip in ip_count:
+                    ip_count[ip] += 1
+                else:
+                    ip_count[ip] = 1
+
+                print("=" * 50)
+                print("发现可疑攻击行为")
+                print(f"攻击IP: {ip}")
+                print(f"攻击特征: {keyword}")
+                print(f"原始日志: {line.strip()}")
+
+print("\n攻击IP统计:")
+print("=" * 50)
+
+for ip, count in ip_count.items():
+    print(f"{ip} -> 攻击次数: {count}")
