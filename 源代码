@@ -1,38 +1,130 @@
-attack_keywords = [
-    "union",
-    "select",
-    "or 1=1",
-    "<script>",
-    "alert(",
-    "sqlmap"
-]
+import re
+import urllib.parse
+from collections import defaultdict
 
-ip_count = {}
+# =========================
+# 风险规则配置
+# =========================
+
+RULES = {
+    "SQL Injection": {
+        "union": 2,
+        "select": 1,
+        "or 1=1": 5,
+        "sleep(": 5,
+        "benchmark(": 5,
+        "information_schema": 4,
+        "--": 2
+    },
+
+    "XSS": {
+        "<script>": 5,
+        "alert(": 3,
+        "onerror=": 5,
+        "onload=": 5,
+        "javascript:": 4
+    },
+
+    "Scanner": {
+        "sqlmap": 10,
+        "nikto": 10,
+        "nmap": 8,
+        "acunetix": 10
+    },
+
+    "Path Traversal": {
+        "../": 5,
+        "..\\": 5,
+        "/etc/passwd": 10
+    }
+}
+
+# 超过该分值才告警
+RISK_THRESHOLD = 5
+
+# =========================
+# 正则预编译（提高性能）
+# =========================
+
+compiled_rules = {}
+
+for attack_type, rule_dict in RULES.items():
+
+    pattern = "|".join(re.escape(keyword) for keyword in rule_dict.keys())
+
+    compiled_rules[attack_type] = re.compile(pattern)
+
+
+# =========================
+# IP统计
+# =========================
+
+ip_attack_count = defaultdict(int)
+
+# =========================
+# 日志分析
+# =========================
 
 with open("access.log", "r", encoding="utf-8") as file:
+
     for line in file:
 
-        line_lower = line.lower()
+        # 提取IP
+        ip = line.split(" ")[0]
 
-        for keyword in attack_keywords:
+        # 转小写
+        normalized_line = line.lower()
 
-            if keyword in line_lower:
+        # URL解码（处理编码绕过）
+        normalized_line = urllib.parse.unquote(normalized_line)
 
-                ip = line.split(" ")[0]
+        total_score = 0
+        matched_keywords = []
+        attack_categories = set()
 
-                if ip in ip_count:
-                    ip_count[ip] += 1
-                else:
-                    ip_count[ip] = 1
+        # =========================
+        # 检测规则
+        # =========================
 
-                print("=" * 50)
-                print("发现可疑攻击行为")
-                print(f"攻击IP: {ip}")
-                print(f"攻击特征: {keyword}")
-                print(f"原始日志: {line.strip()}")
+        for attack_type, regex in compiled_rules.items():
 
-print("\n攻击IP统计:")
-print("=" * 50)
+            matches = regex.findall(normalized_line)
 
-for ip, count in ip_count.items():
+            for match in matches:
+
+                score = RULES[attack_type][match]
+
+                total_score += score
+
+                matched_keywords.append(f"{match}({score})")
+
+                attack_categories.add(attack_type)
+
+        # =========================
+        # 达到风险阈值才告警
+        # =========================
+
+        if total_score >= RISK_THRESHOLD:
+
+            ip_attack_count[ip] += 1
+
+            print("=" * 70)
+            print("发现高风险攻击行为")
+            print(f"攻击IP: {ip}")
+            print(f"攻击类型: {', '.join(attack_categories)}")
+            print(f"风险得分: {total_score}")
+            print(f"命中特征: {', '.join(matched_keywords)}")
+            print(f"原始日志: {line.strip()}")
+
+# =========================
+# 攻击IP统计
+# =========================
+
+print("\n")
+print("=" * 70)
+print("攻击IP统计")
+print("=" * 70)
+
+for ip, count in ip_attack_count.items():
+
     print(f"{ip} -> 攻击次数: {count}")
