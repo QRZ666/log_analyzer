@@ -3,57 +3,80 @@ import urllib.parse
 from collections import defaultdict
 
 # =========================
-# 风险规则配置
+# 增强版风险规则配置
 # =========================
 
 RULES = {
     "SQL Injection": {
+        # 基础关键词
         "union": 2,
         "select": 1,
         "or 1=1": 5,
+        "and 1=1": 5,  # 新增
+        "or '1'='1": 5,  # 新增：带引号版本
+        "and '1'='1": 5,  # 新增
+        "1=1": 3,  # 新增：简写
+        "'or'": 4,  # 新增：'or'模式
         "sleep(": 5,
         "benchmark(": 5,
         "information_schema": 4,
-        "--": 2
+        "--": 2,
+        "#": 2,  # 新增：MySQL注释
+        "/*": 2,  # 新增：多行注释
+        # SQL注入特殊模式
+        "1' and 1=1": 5,  # 新增
+        "1' or '1'='1": 5,  # 新增
+        "1 and 1=1": 5,  # 新增
+        "id=": 1,  # 降低分数，辅助检测
     },
 
     "XSS": {
         "<script>": 5,
+        "<script": 4,  # 新增：不完整的script
         "alert(": 3,
+        "alert('": 3,  # 新增
+        'alert("': 3,  # 新增
         "onerror=": 5,
         "onload=": 5,
-        "javascript:": 4
+        "javascript:": 4,
+        "onclick=": 4,  # 新增
+        "<img": 3,  # 新增
+        "<svg": 3,  # 新增
+        "prompt(": 3,  # 新增
+        "confirm(": 3,  # 新增
     },
 
     "Scanner": {
         "sqlmap": 10,
         "nikto": 10,
         "nmap": 8,
-        "acunetix": 10
+        "acunetix": 10,
+        "dirb": 8,  # 新增
+        "gobuster": 8,  # 新增
     },
 
     "Path Traversal": {
         "../": 5,
         "..\\": 5,
-        "/etc/passwd": 10
+        "/etc/passwd": 10,
+        "windows\\system32": 10,  # 新增
+        "boot.ini": 8,  # 新增
     }
 }
 
-# 超过该分值才告警
 RISK_THRESHOLD = 5
 
 # =========================
-# 正则预编译（提高性能）
+# 正则预编译（改进版）
 # =========================
 
 compiled_rules = {}
 
 for attack_type, rule_dict in RULES.items():
-
-    pattern = "|".join(re.escape(keyword) for keyword in rule_dict.keys())
-
-    compiled_rules[attack_type] = re.compile(pattern)
-
+    # 按长度降序排序，优先匹配长模式（避免 'or' 被 'or 1=1' 的部分匹配）
+    sorted_keywords = sorted(rule_dict.keys(), key=len, reverse=True)
+    pattern = "|".join(re.escape(keyword) for keyword in sorted_keywords)
+    compiled_rules[attack_type] = re.compile(pattern, re.IGNORECASE)  # 直接使用忽略大小写
 
 # =========================
 # IP统计
@@ -65,56 +88,73 @@ ip_attack_count = defaultdict(int)
 # 日志分析
 # =========================
 
-with open("access.log", "r", encoding="utf-8") as file:
+print("开始分析日志...")
+print("=" * 70)
 
+with open("access.log", "r", encoding="utf-8") as file:
+    line_count = 0
     for line in file:
+        line_count += 1
 
         # 提取IP
-        ip = line.split(" ")[0]
+        parts = line.split(" ")
+        if len(parts) > 0:
+            ip = parts[0]
+        else:
+            continue
 
-        # 转小写
-        normalized_line = line.lower()
+        # 【关键改进】先URL解码，再转小写
+        try:
+            decoded_line = urllib.parse.unquote(line)
+        except:
+            decoded_line = line
 
-        # URL解码（处理编码绕过）
-        normalized_line = urllib.parse.unquote(normalized_line)
+        normalized_line = decoded_line.lower()
 
         total_score = 0
         matched_keywords = []
         attack_categories = set()
 
-        # =========================
         # 检测规则
-        # =========================
-
         for attack_type, regex in compiled_rules.items():
-
             matches = regex.findall(normalized_line)
 
             for match in matches:
-
                 score = RULES[attack_type][match]
-
                 total_score += score
-
                 matched_keywords.append(f"{match}({score})")
-
                 attack_categories.add(attack_type)
 
-        # =========================
+        # 特殊检测：SQL注入模式增强
+        if attack_type == "SQL Injection" or total_score < RISK_THRESHOLD:
+            # 检测常见的SQL注入模式
+            sql_patterns = [
+                (r"'\s+or\s+'\w+'\s*=\s*'\w+'", 4),  # ' or 'x'='x
+                (r"'\s+and\s+'\w+'\s*=\s*'\w+'", 4),  # ' and 'x'='x
+                (r"id\s*=\s*\d+'\s+(or|and)", 3),  # id=1' or
+                (r"\d+\s+(or|and)\s+\d+\s*=\s*\d+", 3),  # 1 or 1=1
+            ]
+
+            for pattern, score in sql_patterns:
+                if re.search(pattern, normalized_line):
+                    total_score += score
+                    matched_keywords.append(f"advanced_sql_pattern({score})")
+                    attack_categories.add("SQL Injection")
+
         # 达到风险阈值才告警
-        # =========================
-
         if total_score >= RISK_THRESHOLD:
-
             ip_attack_count[ip] += 1
 
             print("=" * 70)
-            print("发现高风险攻击行为")
+            print(f"[行号 {line_count}] 发现高风险攻击行为")
             print(f"攻击IP: {ip}")
             print(f"攻击类型: {', '.join(attack_categories)}")
             print(f"风险得分: {total_score}")
-            print(f"命中特征: {', '.join(matched_keywords)}")
-            print(f"原始日志: {line.strip()}")
+            print(f"命中特征: {', '.join(matched_keywords[:10])}")  # 最多显示10个
+            # 显示解码后的请求（前200字符）
+            request_part = normalized_line[:200] if len(normalized_line) > 200 else normalized_line
+            print(f"解码请求: {request_part}")
+            print(f"原始日志: {line.strip()[:150]}...")  # 截断显示
 
 # =========================
 # 攻击IP统计
@@ -125,6 +165,10 @@ print("=" * 70)
 print("攻击IP统计")
 print("=" * 70)
 
-for ip, count in ip_attack_count.items():
-
-    print(f"{ip} -> 攻击次数: {count}")
+if ip_attack_count:
+    # 按攻击次数排序
+    sorted_ips = sorted(ip_attack_count.items(), key=lambda x: x[1], reverse=True)
+    for ip, count in sorted_ips:
+        print(f"{ip} -> 攻击次数: {count}")
+else:
+    print("未发现攻击行为")
