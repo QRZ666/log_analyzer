@@ -1,174 +1,590 @@
+import sys
 import re
+import csv
+import html
 import urllib.parse
+from dataclasses import dataclass
 from collections import defaultdict
 
-# =========================
-# 增强版风险规则配置
-# =========================
+from PyQt5.QtCore import Qt, pyqtSignal, QThread
+from PyQt5.QtGui import QFont, QDragEnterEvent, QDropEvent
+from PyQt5.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QWidget,
+    QLabel,
+    QPushButton,
+    QFileDialog,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTableWidget,
+    QTableWidgetItem,
+    QTextEdit,
+    QLineEdit,
+    QMessageBox,
+    QProgressBar,
+    QGroupBox,
+)
+
 
 RULES = {
     "SQL Injection": {
-        # 基础关键词
         "union": 2,
         "select": 1,
         "or 1=1": 5,
-        "and 1=1": 5,  # 新增
-        "or '1'='1": 5,  # 新增：带引号版本
-        "and '1'='1": 5,  # 新增
-        "1=1": 3,  # 新增：简写
-        "'or'": 4,  # 新增：'or'模式
+        "and 1=1": 5,
+        "or '1'='1": 5,
+        "and '1'='1": 5,
+        "1=1": 3,
         "sleep(": 5,
         "benchmark(": 5,
         "information_schema": 4,
         "--": 2,
-        "#": 2,  # 新增：MySQL注释
-        "/*": 2,  # 新增：多行注释
-        # SQL注入特殊模式
-        "1' and 1=1": 5,  # 新增
-        "1' or '1'='1": 5,  # 新增
-        "1 and 1=1": 5,  # 新增
-        "id=": 1,  # 降低分数，辅助检测
+        "#": 2,
+        "/*": 2,
+        "id=": 1,
     },
-
     "XSS": {
         "<script>": 5,
-        "<script": 4,  # 新增：不完整的script
+        "<script": 4,
         "alert(": 3,
-        "alert('": 3,  # 新增
-        'alert("': 3,  # 新增
         "onerror=": 5,
         "onload=": 5,
         "javascript:": 4,
-        "onclick=": 4,  # 新增
-        "<img": 3,  # 新增
-        "<svg": 3,  # 新增
-        "prompt(": 3,  # 新增
-        "confirm(": 3,  # 新增
+        "onclick=": 4,
+        "<img": 3,
+        "<svg": 3,
+        "prompt(": 3,
+        "confirm(": 3,
     },
-
     "Scanner": {
         "sqlmap": 10,
         "nikto": 10,
         "nmap": 8,
         "acunetix": 10,
-        "dirb": 8,  # 新增
-        "gobuster": 8,  # 新增
+        "dirb": 8,
+        "gobuster": 8,
     },
-
     "Path Traversal": {
         "../": 5,
         "..\\": 5,
         "/etc/passwd": 10,
-        "windows\\system32": 10,  # 新增
-        "boot.ini": 8,  # 新增
-    }
+        "windows\\system32": 10,
+        "boot.ini": 8,
+    },
 }
 
 RISK_THRESHOLD = 5
 
-# =========================
-# 正则预编译（改进版）
-# =========================
 
-compiled_rules = {}
+def build_compiled_rules():
+    compiled = {}
+    for attack_type, rule_dict in RULES.items():
+        sorted_keywords = sorted(rule_dict.keys(), key=len, reverse=True)
+        pattern = "|".join(re.escape(keyword) for keyword in sorted_keywords)
+        compiled[attack_type] = re.compile(pattern, re.IGNORECASE)
+    return compiled
 
-for attack_type, rule_dict in RULES.items():
-    # 按长度降序排序，优先匹配长模式（避免 'or' 被 'or 1=1' 的部分匹配）
-    sorted_keywords = sorted(rule_dict.keys(), key=len, reverse=True)
-    pattern = "|".join(re.escape(keyword) for keyword in sorted_keywords)
-    compiled_rules[attack_type] = re.compile(pattern, re.IGNORECASE)  # 直接使用忽略大小写
 
-# =========================
-# IP统计
-# =========================
+COMPILED_RULES = build_compiled_rules()
 
-ip_attack_count = defaultdict(int)
 
-# =========================
-# 日志分析
-# =========================
+def extract_ip(line: str) -> str:
+    m = re.match(r"^(\S+)", line.strip())
+    return m.group(1) if m else "Unknown"
 
-print("开始分析日志...")
-print("=" * 70)
 
-with open("access.log", "r", encoding="utf-8") as file:
-    line_count = 0
-    for line in file:
-        line_count += 1
+def normalize_line(line: str) -> str:
+    try:
+        decoded = urllib.parse.unquote(line)
+        decoded = urllib.parse.unquote(decoded)
+    except Exception:
+        decoded = line
+    return decoded.lower()
 
-        # 提取IP
-        parts = line.split(" ")
-        if len(parts) > 0:
-            ip = parts[0]
-        else:
+
+def advanced_sql_patterns():
+    return [
+        (re.compile(r"'\s+or\s+'\w+'\s*=\s*'\w+'", re.IGNORECASE), 4),
+        (re.compile(r"'\s+and\s+'\w+'\s*=\s*'\w+'", re.IGNORECASE), 4),
+        (re.compile(r"id\s*=\s*\d+'\s+(or|and)", re.IGNORECASE), 3),
+        (re.compile(r"\d+\s+(or|and)\s+\d+\s*=\s*\d+", re.IGNORECASE), 3),
+        (re.compile(r"union\s+select", re.IGNORECASE), 4),
+    ]
+
+
+ADV_SQL_PATTERNS = advanced_sql_patterns()
+
+
+@dataclass
+class Finding:
+    line_no: int
+    ip: str
+    score: int
+    categories: str
+    matched: str
+    normalized: str
+    raw: str
+
+
+def analyze_line(line: str, line_no: int) -> tuple[int, set[str], list[str]]:
+    normalized = normalize_line(line)
+    total_score = 0
+    categories = set()
+    matches = []
+
+    for attack_type, regex in COMPILED_RULES.items():
+        found = regex.findall(normalized)
+        if not found:
             continue
 
-        # 【关键改进】先URL解码，再转小写
-        try:
-            decoded_line = urllib.parse.unquote(line)
-        except:
-            decoded_line = line
+        for match in found:
+            key = match.lower()
+            score = RULES[attack_type].get(key, 0)
+            if score == 0 and key in RULES[attack_type]:
+                score = RULES[attack_type][key]
+            total_score += score
+            categories.add(attack_type)
+            matches.append(f"{match}({score})")
 
-        normalized_line = decoded_line.lower()
-
-        total_score = 0
-        matched_keywords = []
-        attack_categories = set()
-
-        # 检测规则
-        for attack_type, regex in compiled_rules.items():
-            matches = regex.findall(normalized_line)
-
-            for match in matches:
-                score = RULES[attack_type][match]
+    if "SQL Injection" in categories or total_score < RISK_THRESHOLD:
+        for pattern, score in ADV_SQL_PATTERNS:
+            if pattern.search(normalized):
                 total_score += score
-                matched_keywords.append(f"{match}({score})")
-                attack_categories.add(attack_type)
+                categories.add("SQL Injection")
+                matches.append(f"advanced_sql_pattern({score})")
 
-        # 特殊检测：SQL注入模式增强
-        if attack_type == "SQL Injection" or total_score < RISK_THRESHOLD:
-            # 检测常见的SQL注入模式
-            sql_patterns = [
-                (r"'\s+or\s+'\w+'\s*=\s*'\w+'", 4),  # ' or 'x'='x
-                (r"'\s+and\s+'\w+'\s*=\s*'\w+'", 4),  # ' and 'x'='x
-                (r"id\s*=\s*\d+'\s+(or|and)", 3),  # id=1' or
-                (r"\d+\s+(or|and)\s+\d+\s*=\s*\d+", 3),  # 1 or 1=1
+    return total_score, categories, matches[:10]
+
+
+class LogAnalysisWorker(QThread):
+    progress = pyqtSignal(int)
+    status = pyqtSignal(str)
+    finished_analysis = pyqtSignal(list, dict)
+
+    def __init__(self, file_path: str, parent=None):
+        super().__init__(parent)
+        self.file_path = file_path
+
+    def run(self):
+        findings = []
+        ip_attack_count = defaultdict(int)
+
+        try:
+            with open(self.file_path, "r", encoding="utf-8", errors="ignore") as f:
+                lines = f.readlines()
+
+            total_lines = max(len(lines), 1)
+            self.status.emit("开始分析...")
+
+            for idx, line in enumerate(lines, start=1):
+                score, categories, matches = analyze_line(line, idx)
+                if score >= RISK_THRESHOLD:
+                    ip = extract_ip(line)
+                    ip_attack_count[ip] += 1
+                    findings.append(
+                        Finding(
+                            line_no=idx,
+                            ip=ip,
+                            score=score,
+                            categories=", ".join(sorted(categories)) if categories else "Unknown",
+                            matched=", ".join(matches),
+                            normalized=normalize_line(line)[:250],
+                            raw=line.strip()[:250],
+                        )
+                    )
+
+                if idx % 50 == 0 or idx == total_lines:
+                    self.progress.emit(int(idx * 100 / total_lines))
+                    self.status.emit(f"分析中... {idx}/{total_lines}")
+
+            self.progress.emit(100)
+            self.status.emit("分析完成")
+            self.finished_analysis.emit(findings, dict(ip_attack_count))
+        except Exception as e:
+            self.status.emit(f"分析失败：{e}")
+            self.finished_analysis.emit([], {})
+
+
+class DropArea(QLabel):
+    file_dropped = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self.setAcceptDrops(True)
+        self.setAlignment(Qt.AlignCenter)
+        self.setText("把日志文件拖到这里\n或者点击“选择文件”")
+        self.setMinimumHeight(120)
+        self.setObjectName("DropArea")
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+
+    def dropEvent(self, event: QDropEvent):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
+        path = urls[0].toLocalFile()
+        if path:
+            self.file_dropped.emit(path)
+
+
+class LogAnalyzerWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.file_path = ""
+        self.findings = []
+        self.ip_stats = {}
+        self.worker = None
+
+        self.setWindowTitle("Web攻击日志分析工具")
+        self.setMinimumSize(1200, 780)
+
+        self._build_ui()
+        self._apply_style()
+
+    def _build_ui(self):
+        central = QWidget()
+        self.setCentralWidget(central)
+
+        main_layout = QVBoxLayout(central)
+
+        title = QLabel("Web攻击日志分析工具")
+        title.setObjectName("TitleLabel")
+        subtitle = QLabel("拖拽日志文件，分析 SQL 注入 / XSS / 扫描器 / 路径穿越")
+        subtitle.setObjectName("SubtitleLabel")
+
+        main_layout.addWidget(title)
+        main_layout.addWidget(subtitle)
+
+        top_box = QGroupBox("文件输入")
+        top_layout = QVBoxLayout(top_box)
+
+        self.drop_area = DropArea()
+        self.drop_area.file_dropped.connect(self.load_file)
+
+        file_row = QHBoxLayout()
+        self.file_edit = QLineEdit()
+        self.file_edit.setPlaceholderText("日志文件路径")
+        self.file_edit.setReadOnly(True)
+
+        btn_choose = QPushButton("选择文件")
+        btn_choose.clicked.connect(self.choose_file)
+
+        btn_analyze = QPushButton("开始分析")
+        btn_analyze.clicked.connect(self.start_analysis)
+
+        btn_save = QPushButton("导出报告")
+        btn_save.clicked.connect(self.export_report)
+
+        file_row.addWidget(self.file_edit, 1)
+        file_row.addWidget(btn_choose)
+        file_row.addWidget(btn_analyze)
+        file_row.addWidget(btn_save)
+
+        top_layout.addWidget(self.drop_area)
+        top_layout.addLayout(file_row)
+
+        main_layout.addWidget(top_box)
+
+        mid_layout = QHBoxLayout()
+
+        left_box = QGroupBox("结果列表")
+        left_layout = QVBoxLayout(left_box)
+
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(["行号", "IP", "风险分", "类型", "命中特征"])
+        self.table.setWordWrap(False)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+
+        left_layout.addWidget(self.table)
+
+        right_box = QGroupBox("详细信息")
+        right_layout = QVBoxLayout(right_box)
+
+        self.detail = QTextEdit()
+        self.detail.setReadOnly(True)
+        self.detail.setPlaceholderText("选中结果后查看详情")
+
+        right_layout.addWidget(self.detail)
+
+        mid_layout.addWidget(left_box, 2)
+        mid_layout.addWidget(right_box, 1)
+
+        main_layout.addLayout(mid_layout)
+
+        bottom_box = QGroupBox("攻击IP统计")
+        bottom_layout = QVBoxLayout(bottom_box)
+
+        self.ip_table = QTableWidget(0, 2)
+        self.ip_table.setHorizontalHeaderLabels(["IP", "攻击次数"])
+        self.ip_table.setAlternatingRowColors(True)
+        self.ip_table.horizontalHeader().setStretchLastSection(True)
+        bottom_layout.addWidget(self.ip_table)
+
+        main_layout.addWidget(bottom_box)
+
+        status_row = QHBoxLayout()
+        self.status_label = QLabel("就绪")
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setValue(0)
+        self.progress_bar.setMaximumHeight(18)
+
+        status_row.addWidget(self.status_label, 1)
+        status_row.addWidget(self.progress_bar, 2)
+
+        main_layout.addLayout(status_row)
+
+        self.table.itemSelectionChanged.connect(self.show_selected_detail)
+
+    def _apply_style(self):
+        self.setStyleSheet("""
+            QWidget {
+                background: #0f172a;
+                color: #e2e8f0;
+                font-size: 14px;
+            }
+            QGroupBox {
+                border: 1px solid #334155;
+                border-radius: 10px;
+                margin-top: 12px;
+                padding: 10px;
+                background: #111827;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 12px;
+                top: 4px;
+                padding: 0 6px;
+                color: #93c5fd;
+            }
+            QLabel#TitleLabel {
+                font-size: 28px;
+                font-weight: 700;
+                color: #f8fafc;
+                padding: 4px 0;
+            }
+            QLabel#SubtitleLabel {
+                color: #94a3b8;
+                padding-bottom: 6px;
+            }
+            QLabel#DropArea {
+                border: 2px dashed #475569;
+                border-radius: 14px;
+                padding: 18px;
+                background: #0b1220;
+                color: #cbd5e1;
+                font-size: 16px;
+                min-height: 110px;
+            }
+            QLineEdit, QTextEdit {
+                background: #0b1220;
+                border: 1px solid #334155;
+                border-radius: 8px;
+                padding: 8px;
+                color: #e2e8f0;
+            }
+            QPushButton {
+                background: #2563eb;
+                border: none;
+                border-radius: 8px;
+                padding: 10px 16px;
+                color: white;
+                font-weight: 600;
+            }
+            QPushButton:hover {
+                background: #1d4ed8;
+            }
+            QPushButton:pressed {
+                background: #1e40af;
+            }
+            QTableWidget {
+                background: #0b1220;
+                gridline-color: #334155;
+                selection-background-color: #1d4ed8;
+                border: 1px solid #334155;
+                border-radius: 8px;
+            }
+            QHeaderView::section {
+                background: #1e293b;
+                color: #e2e8f0;
+                padding: 8px;
+                border: none;
+                border-bottom: 1px solid #334155;
+            }
+            QProgressBar {
+                border: 1px solid #334155;
+                border-radius: 8px;
+                background: #0b1220;
+                text-align: center;
+                color: #e2e8f0;
+            }
+            QProgressBar::chunk {
+                background: #22c55e;
+                border-radius: 8px;
+            }
+        """)
+
+        font = QFont("Microsoft YaHei", 10)
+        self.setFont(font)
+
+    def choose_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择日志文件",
+            "",
+            "Log Files (*.log *.txt *.csv);;All Files (*)"
+        )
+        if path:
+            self.load_file(path)
+
+    def load_file(self, path: str):
+        self.file_path = path
+        self.file_edit.setText(path)
+        self.drop_area.setText(f"已选择文件：\n{path}\n\n点击“开始分析”")
+        self.status_label.setText("文件已加载")
+        self.detail.setPlainText("")
+        self.clear_results()
+        self.progress_bar.setValue(0)
+
+    def clear_results(self):
+        self.table.setRowCount(0)
+        self.ip_table.setRowCount(0)
+        self.findings = []
+        self.ip_stats = {}
+
+    def start_analysis(self):
+        if not self.file_path:
+            QMessageBox.warning(self, "提示", "请先选择或拖入日志文件。")
+            return
+
+        self.clear_results()
+        self.status_label.setText("准备分析...")
+        self.progress_bar.setValue(0)
+
+        self.worker = LogAnalysisWorker(self.file_path)
+        self.worker.progress.connect(self.progress_bar.setValue)
+        self.worker.status.connect(self.status_label.setText)
+        self.worker.finished_analysis.connect(self.on_analysis_finished)
+        self.worker.start()
+
+    def on_analysis_finished(self, findings, ip_stats):
+        self.findings = findings
+        self.ip_stats = ip_stats
+        self.populate_table()
+        self.populate_ip_table()
+
+        if not findings:
+            self.detail.setPlainText("未发现达到阈值的攻击行为。")
+        else:
+            self.detail.setPlainText(
+                f"分析完成。\n"
+                f"命中记录：{len(findings)}\n"
+                f"攻击IP：{len(ip_stats)}\n"
+                f"日志文件：{self.file_path}"
+            )
+
+    def populate_table(self):
+        self.table.setRowCount(len(self.findings))
+        for row, item in enumerate(self.findings):
+            values = [
+                str(item.line_no),
+                item.ip,
+                str(item.score),
+                item.categories,
+                item.matched,
             ]
+            for col, value in enumerate(values):
+                cell = QTableWidgetItem(value)
+                if col in (0, 2):
+                    cell.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, col, cell)
+        self.table.resizeColumnsToContents()
 
-            for pattern, score in sql_patterns:
-                if re.search(pattern, normalized_line):
-                    total_score += score
-                    matched_keywords.append(f"advanced_sql_pattern({score})")
-                    attack_categories.add("SQL Injection")
+    def populate_ip_table(self):
+        sorted_ips = sorted(self.ip_stats.items(), key=lambda x: x[1], reverse=True)
+        self.ip_table.setRowCount(len(sorted_ips))
+        for row, (ip, count) in enumerate(sorted_ips):
+            self.ip_table.setItem(row, 0, QTableWidgetItem(ip))
+            count_item = QTableWidgetItem(str(count))
+            count_item.setTextAlignment(Qt.AlignCenter)
+            self.ip_table.setItem(row, 1, count_item)
+        self.ip_table.resizeColumnsToContents()
 
-        # 达到风险阈值才告警
-        if total_score >= RISK_THRESHOLD:
-            ip_attack_count[ip] += 1
+    def show_selected_detail(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        row = rows[0].row()
+        item = self.findings[row]
+        detail_text = (
+            f"行号：{item.line_no}\n"
+            f"IP：{item.ip}\n"
+            f"风险分：{item.score}\n"
+            f"攻击类型：{item.categories}\n"
+            f"命中特征：{item.matched}\n"
+            f"\n解码后内容：\n{item.normalized}\n"
+            f"\n原始日志：\n{item.raw}"
+        )
+        self.detail.setPlainText(detail_text)
 
-            print("=" * 70)
-            print(f"[行号 {line_count}] 发现高风险攻击行为")
-            print(f"攻击IP: {ip}")
-            print(f"攻击类型: {', '.join(attack_categories)}")
-            print(f"风险得分: {total_score}")
-            print(f"命中特征: {', '.join(matched_keywords[:10])}")  # 最多显示10个
-            # 显示解码后的请求（前200字符）
-            request_part = normalized_line[:200] if len(normalized_line) > 200 else normalized_line
-            print(f"解码请求: {request_part}")
-            print(f"原始日志: {line.strip()[:150]}...")  # 截断显示
+    def export_report(self):
+        if not self.findings:
+            QMessageBox.information(self, "提示", "没有可导出的分析结果。")
+            return
 
-# =========================
-# 攻击IP统计
-# =========================
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "导出报告",
+            "log_report.csv",
+            "CSV Files (*.csv);;Text Files (*.txt)"
+        )
+        if not save_path:
+            return
 
-print("\n")
-print("=" * 70)
-print("攻击IP统计")
-print("=" * 70)
+        try:
+            if save_path.lower().endswith(".csv"):
+                with open(save_path, "w", newline="", encoding="utf-8-sig") as f:
+                    writer = csv.writer(f)
+                    writer.writerow(["行号", "IP", "风险分", "攻击类型", "命中特征", "解码后内容", "原始日志"])
+                    for item in self.findings:
+                        writer.writerow([
+                            item.line_no,
+                            item.ip,
+                            item.score,
+                            item.categories,
+                            item.matched,
+                            item.normalized,
+                            item.raw,
+                        ])
+            else:
+                with open(save_path, "w", encoding="utf-8") as f:
+                    f.write("Web攻击日志分析报告\n")
+                    f.write("=" * 60 + "\n\n")
+                    f.write(f"文件：{self.file_path}\n")
+                    f.write(f"命中记录：{len(self.findings)}\n")
+                    f.write(f"攻击IP数：{len(self.ip_stats)}\n\n")
+                    for item in self.findings:
+                        f.write(f"[行号 {item.line_no}] IP={item.ip} 分数={item.score} 类型={item.categories}\n")
+                        f.write(f"命中特征：{item.matched}\n")
+                        f.write(f"解码后内容：{item.normalized}\n")
+                        f.write(f"原始日志：{item.raw}\n")
+                        f.write("-" * 60 + "\n")
 
-if ip_attack_count:
-    # 按攻击次数排序
-    sorted_ips = sorted(ip_attack_count.items(), key=lambda x: x[1], reverse=True)
-    for ip, count in sorted_ips:
-        print(f"{ip} -> 攻击次数: {count}")
-else:
-    print("未发现攻击行为")
+            QMessageBox.information(self, "成功", f"报告已导出：\n{save_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"导出失败：{e}")
+
+
+def main():
+    app = QApplication(sys.argv)
+    win = LogAnalyzerWindow()
+    win.show()
+    sys.exit(app.exec_())
+
+
+if __name__ == "__main__":
+    main()
