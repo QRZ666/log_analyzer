@@ -1,10 +1,13 @@
 import sys
 import re
 import csv
+import json
+import ast
 import html
 import urllib.parse
 from dataclasses import dataclass
 from collections import defaultdict
+from pathlib import Path
 
 from PyQt5.QtCore import Qt, pyqtSignal, QThread
 from PyQt5.QtGui import QFont, QDragEnterEvent, QDropEvent
@@ -32,8 +35,10 @@ RULES = {
         "union": 2,
         "select": 1,
         "or 1=1": 5,
-        "and 1=1": 5,
+        "or'1'='1": 5,
         "or '1'='1": 5,
+        "and 1=1": 5,
+        "and'1'='1": 5,
         "and '1'='1": 5,
         "1=1": 3,
         "sleep(": 5,
@@ -43,6 +48,8 @@ RULES = {
         "#": 2,
         "/*": 2,
         "id=": 1,
+        "%27or": 5,
+        "or%27": 5,
     },
     "XSS": {
         "<script>": 5,
@@ -56,6 +63,10 @@ RULES = {
         "<svg": 3,
         "prompt(": 3,
         "confirm(": 3,
+        "alert('": 3,
+        'alert("': 3,
+        "%3Cscript%3E": 5,
+        "%3Cimg": 3,
     },
     "Scanner": {
         "sqlmap": 10,
@@ -71,10 +82,47 @@ RULES = {
         "/etc/passwd": 10,
         "windows\\system32": 10,
         "boot.ini": 8,
+        "..;/": 5,
+        "..%2f": 5,
+        "..%252f": 5,
     },
 }
 
 RISK_THRESHOLD = 5
+
+LOG_MARKERS = (
+    "print(",
+    "logging.",
+    "logger.",
+    "traceback",
+    "exception",
+    "warn(",
+    "warning(",
+    "error(",
+    "info(",
+    "critical(",
+    "debug(",
+)
+
+ATTACK_HINTS = sorted(
+    {
+        keyword.lower()
+        for rule_dict in RULES.values()
+        for keyword in rule_dict.keys()
+    },
+    key=len,
+    reverse=True,
+)
+
+APACHE_NGINX_RE = re.compile(
+    r'^(?P<ip>\S+)\s+\S+\s+\S+\s+\[(?P<time>[^\]]+)\]\s+'
+    r'"(?P<method>[A-Z]+)\s+(?P<uri>.*?)\s+HTTP/[^"]*"\s+'
+    r'(?P<status>\d{3})\s+(?P<size>\S+)'
+    r'(?:\s+"(?P<referer>[^"]*)"\s+"(?P<ua>[^"]*)")?',
+    re.IGNORECASE,
+)
+
+QUOTED_TEXT_RE = re.compile(r'"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'')
 
 
 def build_compiled_rules():
@@ -89,18 +137,32 @@ def build_compiled_rules():
 COMPILED_RULES = build_compiled_rules()
 
 
-def extract_ip(line: str) -> str:
-    m = re.match(r"^(\S+)", line.strip())
+def extract_ip(text: str) -> str:
+    m = re.match(r"^(\S+)", text.strip())
     return m.group(1) if m else "Unknown"
 
 
-def normalize_line(line: str) -> str:
+def normalize_line(text: str) -> str:
+    """标准化文本：HTML反转义 + URL解码 + 转小写"""
     try:
-        decoded = urllib.parse.unquote(line)
-        decoded = urllib.parse.unquote(decoded)
+        decoded = html.unescape(str(text))
+        for _ in range(2):
+            new_decoded = urllib.parse.unquote_plus(decoded)
+            if new_decoded == decoded:
+                break
+            decoded = new_decoded
     except Exception:
-        decoded = line
+        decoded = str(text)
     return decoded.lower()
+
+
+def extract_quoted_strings(text: str) -> list[str]:
+    results = []
+    for match in QUOTED_TEXT_RE.finditer(text):
+        value = match.group(1) if match.group(1) is not None else match.group(2)
+        if value:
+            results.append(html.unescape(value))
+    return results
 
 
 def advanced_sql_patterns():
@@ -127,32 +189,301 @@ class Finding:
     raw: str
 
 
-def analyze_line(line: str, line_no: int) -> tuple[int, set[str], list[str]]:
-    normalized = normalize_line(line)
+@dataclass
+class SourceEntry:
+    line_no: int
+    ip: str
+    text: str
+    raw: str
+
+
+def get_call_name(node) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        base = get_call_name(node.value)
+        return f"{base}.{node.attr}" if base else node.attr
+    return ""
+
+
+def read_text_file_lines(file_path: str) -> list[str]:
+    encodings = [
+        "utf-8",
+        "utf-8-sig",
+        "gbk",
+        "gb2312",
+        "utf-16",
+        "utf-16le",
+        "utf-16be",
+    ]
+    last_error = None
+    for enc in encodings:
+        try:
+            with open(file_path, "r", encoding=enc, errors="strict") as f:
+                return f.readlines()
+        except Exception as e:
+            last_error = e
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            return f.readlines()
+    except Exception as e:
+        raise RuntimeError(f"无法读取文件：{e if e else last_error}")
+
+
+def parse_json_log_line(raw: str):
+    stripped = raw.strip()
+    if not stripped.startswith("{") or not stripped.endswith("}"):
+        return None
+
+    try:
+        obj = json.loads(stripped)
+    except Exception:
+        return None
+
+    if not isinstance(obj, dict):
+        return None
+
+    ip = (
+        obj.get("ip")
+        or obj.get("remote_addr")
+        or obj.get("client_ip")
+        or obj.get("src_ip")
+        or obj.get("host")
+        or "Unknown"
+    )
+
+    fields = [
+        "request",
+        "request_line",
+        "uri",
+        "url",
+        "path",
+        "query",
+        "args",
+        "message",
+        "msg",
+        "log",
+        "body",
+        "data",
+        "referer",
+        "user_agent",
+        "http_user_agent",
+        "ua",
+        "cookie",
+        "payload",
+    ]
+
+    parts = []
+    for key in fields:
+        value = obj.get(key)
+        if value is not None and value != "":
+            parts.append(str(value))
+
+    if not parts:
+        parts.append(str(obj))
+
+    return ip, " ".join(parts)
+
+
+def parse_access_log_line(raw: str):
+    m = APACHE_NGINX_RE.match(raw.strip())
+    if not m:
+        return None
+
+    ip = m.group("ip") or "Unknown"
+    method = m.group("method") or ""
+    uri = m.group("uri") or ""
+    referer = m.group("referer") or ""
+    ua = m.group("ua") or ""
+    text = " ".join(part for part in [method, uri, referer, ua] if part)
+    return ip, text
+
+
+def looks_like_py_log_line(raw: str) -> bool:
+    low = raw.lower()
+    if raw.lstrip().startswith("#"):
+        return True
+    if any(marker in low for marker in LOG_MARKERS):
+        return True
+
+    normalized = normalize_line(raw)
+    for hint in ATTACK_HINTS:
+        if len(hint) < 4:
+            continue
+        if hint in normalized:
+            return True
+    return False
+
+
+def extract_entries_from_plain_file(file_path: str) -> list[SourceEntry]:
+    entries = []
+    lines = read_text_file_lines(file_path)
+
+    for line_no, raw in enumerate(lines, start=1):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+
+        parsed = parse_json_log_line(stripped)
+        if parsed:
+            ip, text = parsed
+        else:
+            parsed = parse_access_log_line(stripped)
+            if parsed:
+                ip, text = parsed
+            else:
+                ip = extract_ip(stripped)
+                text = stripped
+
+        entries.append(
+            SourceEntry(
+                line_no=line_no,
+                ip=ip,
+                text=text,
+                raw=stripped,
+            )
+        )
+    return entries
+
+
+def extract_entries_from_py_file(file_path: str) -> list[SourceEntry]:
+    entries = []
+    seen = set()
+
+    lines = read_text_file_lines(file_path)
+    source = "".join(lines)
+
+    # 1) 从 print / logging / logger 调用里抓真正的日志文本
+    try:
+        tree = ast.parse(source, filename=file_path)
+
+        class Visitor(ast.NodeVisitor):
+            def visit_Call(self, node):
+                call_name = get_call_name(node.func).lower()
+
+                is_log_call = (
+                    call_name == "print"
+                    or call_name.startswith("logging.")
+                    or call_name.startswith("logger.")
+                    or call_name.startswith("log.")
+                    or call_name.endswith(".print")
+                )
+
+                if is_log_call:
+                    segment = ast.get_source_segment(source, node) or ""
+                    quoted = extract_quoted_strings(segment)
+                    candidate_text = " ".join(quoted).strip() if quoted else segment.strip()
+
+                    if candidate_text:
+                        key = (getattr(node, "lineno", 1), candidate_text)
+                        if key not in seen:
+                            seen.add(key)
+                            entries.append(
+                                SourceEntry(
+                                    line_no=getattr(node, "lineno", 1),
+                                    ip=extract_ip(candidate_text),
+                                    text=candidate_text,
+                                    raw=segment.strip() or candidate_text,
+                                )
+                            )
+
+                self.generic_visit(node)
+
+        Visitor().visit(tree)
+    except Exception:
+        pass
+
+    # 2) 行级兜底：注释、明显日志行、带攻击载荷的字符串行
+    for line_no, raw in enumerate(source.splitlines(), start=1):
+        stripped = raw.strip()
+        if not stripped:
+            continue
+
+        should_add = False
+        candidate_text = ""
+
+        if stripped.startswith("#"):
+            should_add = True
+            candidate_text = stripped[1:].strip()
+
+        elif looks_like_py_log_line(stripped):
+            should_add = True
+            quoted = extract_quoted_strings(stripped)
+            candidate_text = " ".join(quoted).strip() if quoted else stripped
+
+        if should_add and candidate_text:
+            key = (line_no, candidate_text)
+            if key not in seen:
+                seen.add(key)
+                entries.append(
+                    SourceEntry(
+                        line_no=line_no,
+                        ip=extract_ip(candidate_text),
+                        text=candidate_text,
+                        raw=stripped,
+                    )
+                )
+
+    return entries
+
+
+def collect_entries(file_path: str) -> list[SourceEntry]:
+    suffix = Path(file_path).suffix.lower()
+    if suffix == ".py":
+        py_entries = extract_entries_from_py_file(file_path)
+        if py_entries:
+            return py_entries
+        return extract_entries_from_plain_file(file_path)
+
+    return extract_entries_from_plain_file(file_path)
+
+
+def analyze_line(text: str, line_no: int) -> tuple[int, set[str], list[str]]:
+    normalized = normalize_line(text)
     total_score = 0
     categories = set()
     matches = []
+    matched_keywords = set()
 
+    # 基础规则匹配
     for attack_type, regex in COMPILED_RULES.items():
         found = regex.findall(normalized)
         if not found:
             continue
 
         for match in found:
-            key = match.lower()
-            score = RULES[attack_type].get(key, 0)
-            if score == 0 and key in RULES[attack_type]:
-                score = RULES[attack_type][key]
-            total_score += score
-            categories.add(attack_type)
-            matches.append(f"{match}({score})")
+            match_lower = match.lower()
+            if match_lower in matched_keywords:
+                continue
 
+            matched = False
+            for keyword, score in RULES[attack_type].items():
+                if keyword.lower() == match_lower:
+                    total_score += score
+                    categories.add(attack_type)
+                    matches.append(f"{match}({score})")
+                    matched_keywords.add(match_lower)
+                    matched = True
+                    break
+
+            if not matched:
+                for keyword, score in RULES[attack_type].items():
+                    if keyword.lower() in match_lower:
+                        total_score += score
+                        categories.add(attack_type)
+                        matches.append(f"{match}({score})")
+                        matched_keywords.add(match_lower)
+                        break
+
+    # 高级 SQL 模式
     if "SQL Injection" in categories or total_score < RISK_THRESHOLD:
         for pattern, score in ADV_SQL_PATTERNS:
             if pattern.search(normalized):
                 total_score += score
                 categories.add("SQL Injection")
-                matches.append(f"advanced_sql_pattern({score})")
+                matches.append(f"advanced_pattern({score})")
+                break
 
     return total_score, categories, matches[:10]
 
@@ -171,36 +502,42 @@ class LogAnalysisWorker(QThread):
         ip_attack_count = defaultdict(int)
 
         try:
-            with open(self.file_path, "r", encoding="utf-8", errors="ignore") as f:
-                lines = f.readlines()
+            entries = collect_entries(self.file_path)
+            total_entries = max(len(entries), 1)
+            self.status.emit(f"开始分析... 共读取 {len(entries)} 条记录")
 
-            total_lines = max(len(lines), 1)
-            self.status.emit("开始分析...")
+            for idx, entry in enumerate(entries, start=1):
+                if not entry.text.strip():
+                    continue
 
-            for idx, line in enumerate(lines, start=1):
-                score, categories, matches = analyze_line(line, idx)
+                score, categories, matches = analyze_line(entry.text, entry.line_no)
+
                 if score >= RISK_THRESHOLD:
-                    ip = extract_ip(line)
+                    ip = entry.ip if entry.ip else extract_ip(entry.text)
+                    if not ip:
+                        ip = "Unknown"
+
                     ip_attack_count[ip] += 1
                     findings.append(
                         Finding(
-                            line_no=idx,
+                            line_no=entry.line_no,
                             ip=ip,
                             score=score,
                             categories=", ".join(sorted(categories)) if categories else "Unknown",
                             matched=", ".join(matches),
-                            normalized=normalize_line(line)[:250],
-                            raw=line.strip()[:250],
+                            normalized=normalize_line(entry.text)[:250],
+                            raw=entry.raw[:250],
                         )
                     )
 
-                if idx % 50 == 0 or idx == total_lines:
-                    self.progress.emit(int(idx * 100 / total_lines))
-                    self.status.emit(f"分析中... {idx}/{total_lines}")
+                if idx % 50 == 0 or idx == total_entries:
+                    self.progress.emit(int(idx * 100 / total_entries))
+                    self.status.emit(f"分析中... {idx}/{total_entries}")
 
             self.progress.emit(100)
-            self.status.emit("分析完成")
+            self.status.emit(f"分析完成，发现 {len(findings)} 条攻击")
             self.finished_analysis.emit(findings, dict(ip_attack_count))
+
         except Exception as e:
             self.status.emit(f"分析失败：{e}")
             self.finished_analysis.emit([], {})
@@ -252,7 +589,7 @@ class LogAnalyzerWindow(QMainWindow):
 
         title = QLabel("Web攻击日志分析工具")
         title.setObjectName("TitleLabel")
-        subtitle = QLabel("拖拽日志文件，分析 SQL 注入 / XSS / 扫描器 / 路径穿越")
+        subtitle = QLabel("拖拽日志文件，分析 SQL 注入 / XSS / 扫描器 / 路径穿越 / .py 日志")
         subtitle.setObjectName("SubtitleLabel")
 
         main_layout.addWidget(title)
@@ -297,7 +634,9 @@ class LogAnalyzerWindow(QMainWindow):
         self.table.setHorizontalHeaderLabels(["行号", "IP", "风险分", "类型", "命中特征"])
         self.table.setWordWrap(False)
         self.table.setAlternatingRowColors(True)
-        self.table.setSortingEnabled(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.table.horizontalHeader().setStretchLastSection(True)
 
         left_layout.addWidget(self.table)
@@ -322,6 +661,9 @@ class LogAnalyzerWindow(QMainWindow):
         self.ip_table = QTableWidget(0, 2)
         self.ip_table.setHorizontalHeaderLabels(["IP", "攻击次数"])
         self.ip_table.setAlternatingRowColors(True)
+        self.ip_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.ip_table.setSelectionMode(QTableWidget.SingleSelection)
+        self.ip_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.ip_table.horizontalHeader().setStretchLastSection(True)
         bottom_layout.addWidget(self.ip_table)
 
@@ -403,10 +745,20 @@ class LogAnalyzerWindow(QMainWindow):
             }
             QTableWidget {
                 background: #0b1220;
+                alternate-background-color: #172033;
                 gridline-color: #334155;
                 selection-background-color: #1d4ed8;
+                selection-color: #ffffff;
                 border: 1px solid #334155;
                 border-radius: 8px;
+                color: #e2e8f0;
+            }
+            QTableWidget::item {
+                color: #e2e8f0;
+                background-color: transparent;
+            }
+            QTableWidget::item:selected {
+                color: #ffffff;
             }
             QHeaderView::section {
                 background: #1e293b;
@@ -436,7 +788,7 @@ class LogAnalyzerWindow(QMainWindow):
             self,
             "选择日志文件",
             "",
-            "Log Files (*.log *.txt *.csv);;All Files (*)"
+            "All Supported Files (*.log *.txt *.csv *.json *.py);;Log Files (*.log *.txt *.csv);;Python Files (*.py);;JSON Files (*.json);;All Files (*)"
         )
         if path:
             self.load_file(path)
@@ -478,7 +830,13 @@ class LogAnalyzerWindow(QMainWindow):
         self.populate_ip_table()
 
         if not findings:
-            self.detail.setPlainText("未发现达到阈值的攻击行为。")
+            self.detail.setPlainText(
+                "未发现达到阈值的攻击行为。\n\n"
+                "可能原因：\n"
+                "1. 日志中没有攻击特征\n"
+                "2. 阈值设置过高（当前阈值=5）\n"
+                "3. 文件格式太特殊，当前解析器还没覆盖到"
+            )
         else:
             self.detail.setPlainText(
                 f"分析完成。\n"
@@ -488,7 +846,9 @@ class LogAnalyzerWindow(QMainWindow):
             )
 
     def populate_table(self):
+        self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.findings))
+
         for row, item in enumerate(self.findings):
             values = [
                 str(item.line_no),
@@ -501,25 +861,44 @@ class LogAnalyzerWindow(QMainWindow):
                 cell = QTableWidgetItem(value)
                 if col in (0, 2):
                     cell.setTextAlignment(Qt.AlignCenter)
+                if col == 0:
+                    cell.setData(Qt.UserRole, row)
                 self.table.setItem(row, col, cell)
+
         self.table.resizeColumnsToContents()
+        self.table.setSortingEnabled(True)
 
     def populate_ip_table(self):
         sorted_ips = sorted(self.ip_stats.items(), key=lambda x: x[1], reverse=True)
         self.ip_table.setRowCount(len(sorted_ips))
+
         for row, (ip, count) in enumerate(sorted_ips):
             self.ip_table.setItem(row, 0, QTableWidgetItem(ip))
             count_item = QTableWidgetItem(str(count))
             count_item.setTextAlignment(Qt.AlignCenter)
             self.ip_table.setItem(row, 1, count_item)
+
         self.ip_table.resizeColumnsToContents()
 
     def show_selected_detail(self):
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
+
         row = rows[0].row()
-        item = self.findings[row]
+        idx_item = self.table.item(row, 0)
+        if idx_item is None:
+            return
+
+        source_index = idx_item.data(Qt.UserRole)
+        if source_index is None:
+            return
+
+        source_index = int(source_index)
+        if not (0 <= source_index < len(self.findings)):
+            return
+
+        item = self.findings[source_index]
         detail_text = (
             f"行号：{item.line_no}\n"
             f"IP：{item.ip}\n"
@@ -581,6 +960,7 @@ class LogAnalyzerWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    app.setStyle("Fusion")
     win = LogAnalyzerWindow()
     win.show()
     sys.exit(app.exec_())
