@@ -1,0 +1,23 @@
+﻿行号,IP,风险分,攻击类型,命中特征,解码后内容,原始日志
+6,103.12.45.67,9,SQL Injection,"id=(1), or '1'='1(5), advanced_pattern(3)","103.12.45.67 - - [28/may/2026:08:22:15 +0800] ""get /user.php?id=1' or '1'='1 http/1.1"" 200 8452
+","103.12.45.67 - - [28/May/2026:08:22:15 +0800] ""GET /user.php?id=1%27%20OR%20%271%27%3D%271 HTTP/1.1"" 200 8452"
+9,103.12.45.67,8,SQL Injection,"id=(1), union(2), select(1), advanced_pattern(4)","103.12.45.67 - - [28/may/2026:08:30:18 +0800] ""get /user.php?id=1 union select 1,2,3,4,5 http/1.1"" 200 12453
+","103.12.45.67 - - [28/May/2026:08:30:18 +0800] ""GET /user.php?id=1%20UNION%20SELECT%201%2C2%2C3%2C4%2C5 HTTP/1.1"" 200 12453"
+11,10.0.0.5,8,XSS,"<script>(5), alert('(3)","10.0.0.5 - - [28/may/2026:08:35:08 +0800] ""get /search.php?q=<script>alert('xss')</script> http/1.1"" 200 4582
+","10.0.0.5 - - [28/May/2026:08:35:08 +0800] ""GET /search.php?q=%3Cscript%3Ealert%28%27XSS%27%29%3C%2Fscript%3E HTTP/1.1"" 200 4582"
+21,10.0.0.5,11,XSS,"<img(3), onerror=(5), alert((3)","10.0.0.5 - - [28/may/2026:08:55:15 +0800] ""get /comment.php?msg=<img src=x onerror=alert(1)> http/1.1"" 200 2315
+","10.0.0.5 - - [28/May/2026:08:55:15 +0800] ""GET /comment.php?msg=%3Cimg%20src%3Dx%20onerror%3Dalert%281%29%3E HTTP/1.1"" 200 2315"
+25,45.33.22.11,5,Path Traversal,../(5),"45.33.22.11 - - [28/may/2026:09:05:48 +0800] ""get /download.php?file=../../../etc/passwd http/1.1"" 200 2345
+","45.33.22.11 - - [28/May/2026:09:05:48 +0800] ""GET /download.php?file=../../../etc/passwd HTTP/1.1"" 200 2345"
+26,103.12.45.67,8,SQL Injection,"id=(1), union(2), select(1), advanced_pattern(4)","103.12.45.67 - - [28/may/2026:09:10:22 +0800] ""get /user.php?id=-1 union select username,password from users http/1.1"" 200 18923
+","103.12.45.67 - - [28/May/2026:09:10:22 +0800] ""GET /user.php?id=-1%20UNION%20SELECT%20username%2Cpassword%20FROM%20users HTTP/1.1"" 200 18923"
+32,172.31.0.22,10,Path Traversal,/etc/passwd(10),"172.31.0.22 - - [28/may/2026:09:25:22 +0800] ""get /shell.php?cmd=cat /etc/passwd http/1.1"" 200 5678
+","172.31.0.22 - - [28/May/2026:09:25:22 +0800] ""GET /shell.php?cmd=cat%20/etc/passwd HTTP/1.1"" 200 5678"
+33,45.33.22.11,5,Path Traversal,../(5),"45.33.22.11 - - [28/may/2026:09:30:05 +0800] ""get /download.php?file=../../../../var/log/apache2/access.log http/1.1"" 200 3456
+","45.33.22.11 - - [28/May/2026:09:30:05 +0800] ""GET /download.php?file=../../../../var/log/apache2/access.log HTTP/1.1"" 200 3456"
+39,103.12.45.67,6,SQL Injection,"id=(1), sleep((5)","103.12.45.67 - - [28/may/2026:09:45:02 +0800] ""get /user.php?id=1 and sleep(5) http/1.1"" 200 1563
+","103.12.45.67 - - [28/May/2026:09:45:02 +0800] ""GET /user.php?id=1%20AND%20SLEEP%285%29 HTTP/1.1"" 200 1563"
+40,103.12.45.67,11,SQL Injection,"id=(1), union(2), select(1), information_schema(4), advanced_pattern(3)","103.12.45.67 - - [28/may/2026:09:45:08 +0800] ""get /user.php?id=1 and 1=2 union select group_concat(table_name) from information_schema.tables http/1.1"" 200 23456
+","103.12.45.67 - - [28/May/2026:09:45:08 +0800] ""GET /user.php?id=1%20AND%201%3D2%20UNION%20SELECT%20group_concat%28table_name%29%20FROM%20information_schema.tables HTTP/1.1"" 200 23456"
+44,10.0.0.5,8,XSS,"onload=(5), alert('(3)","10.0.0.5 - - [28/may/2026:09:55:15 +0800] ""get /feedback.php?msg=<body onload=alert('xss')> http/1.1"" 200 3412
+","10.0.0.5 - - [28/May/2026:09:55:15 +0800] ""GET /feedback.php?msg=%3Cbody%20onload%3Dalert%28%27XSS%27%29%3E HTTP/1.1"" 200 3412"
