@@ -1,0 +1,191 @@
+{
+  "categories": {
+    "SQL Injection": {
+      "keywords": {
+        "union": 2,
+        "select": 1,
+        "or 1=1": 5,
+        "or'1'='1": 5,
+        "or '1'='1": 5,
+        "and 1=1": 5,
+        "and'1'='1": 5,
+        "and '1'='1": 5,
+        "1=1": 3,
+        "sleep(": 5,
+        "benchmark(": 5,
+        "information_schema": 4,
+        "load_file": 5,
+        "into outfile": 5,
+        "into dumpfile": 5,
+        "updatexml": 5,
+        "extractvalue": 5,
+        "concat(": 2,
+        "group_concat": 3,
+        "--": 2,
+        "#": 2,
+        "/*": 2,
+        "id=": 1,
+        "%27or": 5,
+        "or%27": 5
+      },
+      "advanced_patterns": [
+        {"pattern": "'\\s+or\\s+'\\w+'\\s*=\\s*'\\w+'", "score": 4},
+        {"pattern": "'\\s+and\\s+'\\w+'\\s*=\\s*'\\w+'", "score": 4},
+        {"pattern": "id\\s*=\\s*\\d+'\\s+(or|and)", "score": 3},
+        {"pattern": "\\d+\\s+(or|and)\\s+\\d+\\s*=\\s*\\d+", "score": 3},
+        {"pattern": "union\\s+select", "score": 4},
+        {"pattern": "union\\s+all\\s+select", "score": 4},
+        {"pattern": "'\\s*--", "score": 5},
+        {"pattern": "select\\s+.+\\s+from\\s+", "score": 2}
+      ]
+    },
+    "XSS": {
+      "keywords": {
+        "<script>": 5,
+        "<script": 4,
+        "alert(": 3,
+        "onerror=": 5,
+        "onload=": 5,
+        "javascript:": 4,
+        "onclick=": 4,
+        "onmouseover": 4,
+        "onfocus=": 4,
+        "onblur=": 4,
+        "onsubmit=": 4,
+        "onkeydown=": 4,
+        "onkeyup=": 4,
+        "<img": 3,
+        "<svg": 3,
+        "<iframe": 4,
+        "prompt(": 3,
+        "confirm(": 3,
+        "eval(": 3,
+        "alert('": 3,
+        "alert(\"": 3,
+        "document.cookie": 3,
+        "document.write": 3,
+        "innerHTML": 3,
+        "String.fromCharCode": 3,
+        "%3Cscript%3E": 5,
+        "%3Cimg": 3,
+        "%3Ciframe": 4
+      },
+      "advanced_patterns": [
+        {"pattern": "<script[^>]*>.*?</script>", "score": 5},
+        {"pattern": "on\\w+\\s*=\\s*[\"']", "score": 4},
+        {"pattern": "javascript\\s*:", "score": 4}
+      ]
+    },
+    "Scanner": {
+      "keywords": {
+        "sqlmap": 10,
+        "nikto": 10,
+        "nmap": 8,
+        "acunetix": 10,
+        "dirb": 8,
+        "gobuster": 8,
+        "dirsearch": 8,
+        "hydra": 8,
+        "bruteforce": 8,
+        "awvs": 10,
+        "appscan": 10,
+        "nessus": 8,
+        "openvas": 8,
+        "masscan": 8,
+        "zap": 6,
+        "burp": 6,
+        "w3af": 8,
+        "vega": 8,
+        "netsparker": 10,
+        "qualys": 8,
+        "skipfish": 8
+      },
+      "advanced_patterns": []
+    },
+    "Path Traversal": {
+      "keywords": {
+        "../": 5,
+        "..\\": 5,
+        "/etc/passwd": 10,
+        "/etc/shadow": 10,
+        "windows\\system32": 10,
+        "c:\\windows": 10,
+        "boot.ini": 8,
+        "win.ini": 8,
+        "cmd.exe": 8,
+        "..;/": 5,
+        "..%2f": 5,
+        "..%252f": 5,
+        "%2e%2e": 5,
+        "%252e%252e": 5
+      },
+      "advanced_patterns": [
+        {"pattern": "\\.\\.(?:/|%2f|%252f|\\\\|%5c)", "score": 5}
+      ]
+    },
+    "Command Injection": {
+      "keywords": {
+        ";whoami": 8,
+        ";id": 8,
+        ";ls": 6,
+        ";uname": 8,
+        ";cat ": 8,
+        "|whoami": 8,
+        "|id": 8,
+        "|ls": 6,
+        "|cat ": 8,
+        "|/bin/bash": 10,
+        "|/bin/sh": 10,
+        "`id`": 8,
+        "`whoami`": 8,
+        "$(whoami)": 8,
+        "$(id)": 8,
+        "$(cat": 8,
+        "ping -c": 6,
+        "nslookup ": 6,
+        "cmd.exe /c": 10,
+        "powershell": 6,
+        "net user": 8,
+        "net localgroup": 8,
+        "whoami": 6,
+        "ipconfig": 5,
+        "systeminfo": 5,
+        "&&whoami": 8,
+        "&&id": 8,
+        "<?php": 8,
+        "system(": 5
+      },
+      "advanced_patterns": [
+        {"pattern": "[;|&`]\\s*(?:ls|id|whoami|cat|dir|pwd|uname)\\b", "score": 5},
+        {"pattern": "\\$\\([^)]+\\)", "score": 4},
+        {"pattern": "`[^`]+`", "score": 6}
+      ]
+    },
+    "LFI / RFI": {
+      "keywords": {
+        "php://": 8,
+        "file://": 6,
+        "expect://": 8,
+        "data://": 6,
+        "php://filter": 10,
+        "php://input": 10,
+        "=http://": 6,
+        "=https://": 6,
+        "=ftp://": 6,
+        "/proc/self/": 8,
+        "wrapper": 3,
+        "base64-decode": 5,
+        "base64_encode": 5,
+        "readfile": 5
+      },
+      "advanced_patterns": [
+        {"pattern": "(?:include|require)\\s*\\(?\\s*['\"]", "score": 4},
+        {"pattern": "php://(?:filter|input|fd|memory|temp)", "score": 10},
+        {"pattern": "file://(?:/etc|/proc|/var|/home|C:)", "score": 8}
+      ]
+    }
+  },
+  "settings": {
+    "default_threshold": 5
+  }
+}

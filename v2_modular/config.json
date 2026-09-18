@@ -1,0 +1,8 @@
+{
+  "risk_threshold": 5,
+  "geoip_enabled": false,
+  "geoip_db_path": "",
+  "max_file_size_mb": 100,
+  "rules_path": "rules.json",
+  "whitelist_path": "whitelist.json"
+}

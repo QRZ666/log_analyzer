@@ -1,0 +1,49 @@
+# ── Python 虚拟环境 ──
+.venv/
+venv/
+env/
+
+# ── IDE ──
+.idea/
+.vscode/
+*.iml
+
+# ── Python 缓存 ──
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist-info/
+.pytest_cache/
+
+# ── PyInstaller 打包产物 ──
+# 注意：不要忽略 *.spec —— log_analyzer.spec 是构建脚本，必须进仓库
+build/
+dist/
+
+# ── 备份 / 临时文件 ──
+*.bak
+*.tmp
+*.tmp.*
+*.orig
+*~
+
+# ── 体积过大的归档 ──
+*.7z
+*.zip
+
+# ── 导出的报告属于产物，不放源码仓库 ──
+log_report*.csv
+log_report*.html
+log_report*.txt
+
+# ── 本机调试残留 ──
+/logtest.log
+/v2_modular/log_analyzer/testlog
+
+# ── 系统文件 ──
+.DS_Store
+Thumbs.db
+
+# ⚠️ 不要写 *.log / *.txt
+#    会误伤 test_logs/ 里的样本日志和 requirements.txt
