@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .. import __version__
 from ..analyzer import LogAnalyzer
 from ..config import ConfigManager
 from ..export import export_report
@@ -166,7 +167,7 @@ class LogAnalyzerWindow(QMainWindow):
         )
         self.geoip_resolver: GeoIPResolver = None  # 延迟初始化
 
-        self.setWindowTitle("Web攻击日志分析工具 v2.0")
+        self.setWindowTitle(f"Web攻击日志分析工具 v{__version__}")
         self.setMinimumSize(1300, 820)
 
         self._build_ui()
