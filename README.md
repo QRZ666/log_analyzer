@@ -166,3 +166,56 @@ pyinstaller log_analyzer.spec
 ## 📄 开源协议
 
 MIT License
+<html style="margin:0;padding:0;">
+<title>log_analyzer import 依赖树</title>
+<div style="width:100%;box-sizing:border-box;font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;background:#f6f8fa;padding:18px;border-radius:12px;">
+  <div style="text-align:center;font-size:15px;font-weight:600;color:#1f2937;margin-bottom:12px;">log_analyzer 模块引用关系（实线 = 源码确认的 import）</div>
+
+  <!-- 入口 -->
+  <div style="background:#e8f5e9;border:2px solid #43a047;border-radius:10px;padding:8px 12px;text-align:center;max-width:640px;margin:0 auto;">
+    <div style="font-size:14px;font-weight:700;color:#1b5e20;">🏠 main.py（唯一入口）</div>
+    <div style="font-size:12px;color:#2e7d32;font-family:Consolas,monospace;">from log_analyzer.gui.main_window import LogAnalyzerWindow</div>
+  </div>
+  <div style="text-align:center;color:#94a3b8;font-size:15px;line-height:1;margin:4px 0;">↓ 只 import 窗口</div>
+
+  <!-- GUI 层 -->
+  <div style="background:#e3f2fd;border:2px solid #1e88e5;border-radius:10px;padding:8px 12px;text-align:center;max-width:640px;margin:0 auto;">
+    <div style="font-size:14px;font-weight:700;color:#0d47a1;">🖥️ gui/ 层（main_window.py → worker.py）</div>
+    <div style="font-size:12px;color:#1565c0;font-family:Consolas,monospace;margin-top:3px;">from ..analyzer import LogAnalyzer<br>from ..parser import collect_entries · from ..rules import RuleEngine · from ..whitelist import WhitelistManager<br>from ..models import Finding</div>
+  </div>
+  <div style="text-align:center;color:#94a3b8;font-size:15px;line-height:1;margin:4px 0;">↓ worker 负责把核心层拉起来</div>
+
+  <!-- 核心层 -->
+  <div style="display:flex;gap:8px;max-width:640px;margin:0 auto;flex-wrap:wrap;justify-content:center;">
+    <div style="flex:1;min-width:150px;background:#fce4ec;border:2px solid #d81b60;border-radius:10px;padding:8px;text-align:center;">
+      <div style="font-size:13px;font-weight:700;color:#880e4f;">⚙️ analyzer.py</div>
+      <div style="font-size:11.5px;color:#ad1457;margin-top:3px;">引用 parser / rules / whitelist / models</div>
+    </div>
+    <div style="flex:1;min-width:150px;background:#fff3e0;border:2px solid #fb8c00;border-radius:10px;padding:8px;text-align:center;">
+      <div style="font-size:13px;font-weight:700;color:#e65100;">🧩 parser.py</div>
+      <div style="font-size:11.5px;color:#ef6c00;margin-top:3px;">引用 models</div>
+    </div>
+    <div style="flex:1;min-width:150px;background:#fff3e0;border:2px solid #fb8c00;border-radius:10px;padding:8px;text-align:center;">
+      <div style="font-size:13px;font-weight:700;color:#e65100;">🧩 rules.py</div>
+      <div style="font-size:11.5px;color:#ef6c00;margin-top:3px;">引用 models</div>
+    </div>
+    <div style="flex:1;min-width:150px;background:#fff3e0;border:2px solid #fb8c00;border-radius:10px;padding:8px;text-align:center;">
+      <div style="font-size:13px;font-weight:700;color:#e65100;">🧩 whitelist.py</div>
+      <div style="font-size:11.5px;color:#ef6c00;margin-top:3px;">引用 models</div>
+    </div>
+  </div>
+  <div style="text-align:center;color:#94a3b8;font-size:15px;line-height:1;margin:4px 0;">↓ 全部汇聚到</div>
+
+  <!-- models 地基 -->
+  <div style="background:#e0f2f1;border:2px solid #00897b;border-radius:10px;padding:8px 12px;text-align:center;max-width:640px;margin:0 auto;">
+    <div style="font-size:14px;font-weight:700;color:#004d40;">📦 models.py（数据契约地基）</div>
+    <div style="font-size:12px;color:#00695c;margin-top:3px;">SourceEntry · Finding · RuleCategory · WhitelistEntry · GeoInfo · AnalyzerConfig<br><strong>被所有人引用，自己引用 0 个模块</strong></div>
+  </div>
+
+  <!-- 侧边说明 -->
+  <div style="max-width:640px;margin:10px auto 0;background:#fff8e1;border:1.5px dashed #f9a825;border-radius:8px;padding:8px 12px;font-size:12.5px;color:#6d5a00;">
+    旁挂模块（GUI 直接引）：geoip.py · export.py · config.py —— 都是"用到才拉起来"，不参与核心循环
+  </div>
+</div>
+</html>
+
