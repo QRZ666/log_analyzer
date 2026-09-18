@@ -34,7 +34,8 @@
 
 ## 🖼️ 截图
 
-> （待补充）
+> <img width="1302" height="937" alt="image" src="https://github.com/user-attachments/assets/d9e03b32-768b-48e6-ba37-47f5e2032b67" />
+
 
 ---
 
