@@ -94,7 +94,8 @@ v2_modular/
 ├── whitelist.json             # 白名单
 └── requirements.txt           # 依赖清单
 ```
-<img width="982" height="555" alt="image" src="https://github.com/user-attachments/assets/1ee7d40b-0e02-4339-846e-f83063de3ffa" />
+<img width="982" height="634" alt="image" src="https://github.com/user-attachments/assets/ee3c4b38-4400-4d15-8428-cb82637c6e3b" />
+
 
 ---
 
