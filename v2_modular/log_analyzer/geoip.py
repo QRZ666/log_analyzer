@@ -1,7 +1,6 @@
 """IP 地理位置查询 — geoip2 / ipinfo.io 双后端 + LRU 缓存"""
 
 import ipaddress
-import json
 from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
@@ -162,6 +161,12 @@ class GeoIPResolver:
     def clear_cache(self):
         self._cache.clear()
 
+    def close(self):
+        """后台任务结束后及时释放离线数据库文件句柄，可重复调用。"""
+        reader, self._geoip2_reader = self._geoip2_reader, None
+        if reader is not None:
+            reader.close()
+
 
 # 全局单例
 _resolver: Optional[GeoIPResolver] = None
@@ -176,4 +181,6 @@ def get_resolver(db_path: str = "") -> GeoIPResolver:
 
 def reset_resolver():
     global _resolver
-    _resolver = None
+    resolver, _resolver = _resolver, None
+    if resolver is not None:
+        resolver.close()

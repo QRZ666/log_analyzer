@@ -36,6 +36,9 @@ hiddenimports = [
     'log_analyzer.gui.worker',
     'log_analyzer.gui.widgets',
     'log_analyzer.gui.highlight_delegate',
+    'log_analyzer.gui.table_model',
+    'log_analyzer.paths',
+    'log_analyzer.persistence',
     # geoip2 可选依赖
     'geoip2',
     'geoip2.database',

@@ -1,62 +1,123 @@
 """白名单管理 — IP / 正则模式 / 类别压制"""
 
+import copy
 import json
 import re
 from pathlib import Path
 from typing import Optional
 
-from .models import WhitelistEntry
+from . import paths
+from .persistence import atomic_write_json
 
-_DEFAULT_WHITELIST_PATH = Path(__file__).resolve().parent.parent / "whitelist.json"
+_DEFAULT_WHITELIST_PATH = paths.SOURCE_ROOT / "whitelist.json"
 
 
 class WhitelistManager:
-    """白名单管理器"""
+    """白名单管理器；对话框可用 copy/replace_from 实现确认后提交。"""
 
     def __init__(self, whitelist_path: Optional[str] = None):
         self._ips: set[str] = set()
         self._patterns: list[re.Pattern] = []
         self._suppressed_categories: set[str] = set()
-        self._path = Path(whitelist_path) if whitelist_path else _DEFAULT_WHITELIST_PATH
+        self._unknown_fields: dict = {}
+        startup_warning = ""
+        if whitelist_path is None:
+            whitelist_path = (
+                paths.default_data_dir() / "whitelist.json"
+                if paths.is_frozen() else _DEFAULT_WHITELIST_PATH
+            )
+            startup_warning = paths.bootstrap_user_defaults()
+        self._path = Path(whitelist_path).expanduser().resolve()
+        self.load_warning: str = ""
         self.load()
+        self.load_warning = "\n".join(
+            warning for warning in (startup_warning, self.load_warning) if warning
+        )
 
     def load(self):
-        """从 JSON 文件加载白名单"""
+        """健壮加载 JSON；忽略无效字段/条目并提供非致命提示，不自动写盘。"""
         self._ips.clear()
         self._patterns.clear()
         self._suppressed_categories.clear()
-
-        if not self._path.exists():
-            return
-
+        self._unknown_fields = {}
+        self.load_warning = ""
         try:
-            with open(self._path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError):
+            with self._path.open("r", encoding="utf-8-sig") as stream:
+                data = json.load(stream)
+        except FileNotFoundError:
+            self.load_warning = f"白名单文件不存在，已使用空白名单：{self._path}"
+            return
+        except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+            self.load_warning = f"无法加载白名单，已使用空白名单：{self._path}（{exc}）"
             return
 
-        for ip in data.get("ips", []):
-            self._ips.add(ip.strip())
+        if not isinstance(data, dict):
+            self.load_warning = "白名单 JSON 顶层必须为对象，已使用空白名单。"
+            return
 
-        for pattern_str in data.get("patterns", []):
-            try:
-                self._patterns.append(re.compile(pattern_str, re.IGNORECASE))
-            except re.error:
-                pass
-
-        for cat in data.get("categories", []):
-            self._suppressed_categories.add(cat.strip())
+        self._unknown_fields = {
+            key: value for key, value in data.items()
+            if key not in ("ips", "patterns", "categories")
+        }
+        warnings = []
+        for field in ("ips", "patterns", "categories"):
+            values = data.get(field, [])
+            if not isinstance(values, list):
+                warnings.append(f"白名单字段 {field} 必须为列表，已忽略。")
+                continue
+            invalid_count = 0
+            for value in values:
+                if not isinstance(value, str) or not value.strip():
+                    invalid_count += 1
+                    continue
+                if field == "patterns":
+                    try:
+                        self._patterns.append(re.compile(value, re.IGNORECASE))
+                    except (re.error, OverflowError, RecursionError):
+                        invalid_count += 1
+                elif field == "ips":
+                    self._ips.add(value.strip())
+                else:
+                    self._suppressed_categories.add(value.strip())
+            if invalid_count:
+                warnings.append(f"白名单字段 {field} 中 {invalid_count} 个无效条目已忽略。")
+        self.load_warning = "\n".join(warnings)
 
     def save(self):
-        """保存白名单到 JSON 文件"""
-        data = {
+        """原子保存，失败正常抛错且不截断旧白名单。"""
+        data = dict(self._unknown_fields)
+        data.update({
             "ips": sorted(self._ips),
             "patterns": [p.pattern for p in self._patterns],
             "categories": sorted(self._suppressed_categories),
-        }
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self._path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+        })
+        paths.ensure_writable_path(self._path)
+        atomic_write_json(self._path, data)
+
+    def copy(self) -> "WhitelistManager":
+        """纯内存快照：保留保存路径，不调用构造器/load/save 或执行任何 I/O。"""
+        snapshot = object.__new__(type(self))
+        snapshot._path = self._path
+        snapshot.replace_from(self)
+        return snapshot
+
+    def replace_from(self, other: "WhitelistManager") -> None:
+        """拷贝集合及模式，不修改自己的路径，不读写文件。
+
+        确认流程：draft.save() 成功后再 original.replace_from(draft)。编译后的
+        re.Pattern 不可变，可共享；保存它们的列表和其他可变数据都独立复制。
+        """
+        if not isinstance(other, WhitelistManager):
+            raise TypeError("other 必须是 WhitelistManager")
+        ips = set(other._ips)
+        patterns = list(other._patterns)
+        categories = set(other._suppressed_categories)
+        unknown_fields = copy.deepcopy(other._unknown_fields)
+        self._ips = ips
+        self._patterns = patterns
+        self._suppressed_categories = categories
+        self._unknown_fields = unknown_fields
+        self.load_warning = other.load_warning
 
     # ── IP 白名单 ─────────────────────────────────────────
 

@@ -3,7 +3,7 @@
 import re
 
 from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QFont, QTextCharFormat, QSyntaxHighlighter
+from PyQt5.QtGui import QColor, QFont, QFontMetrics
 from PyQt5.QtWidgets import QStyledItemDelegate, QStyleOptionViewItem, QStyle
 
 
@@ -29,9 +29,6 @@ class HighlightDelegate(QStyledItemDelegate):
         else:
             self._pattern = None
 
-    def initStyleOption(self, option: QStyleOptionViewItem, index):
-        super().initStyleOption(option, index)
-
     def paint(self, painter, option, index):
         """自定义绘制以支持高亮"""
         text = index.data(Qt.DisplayRole)
@@ -42,6 +39,13 @@ class HighlightDelegate(QStyledItemDelegate):
         painter.save()
 
         try:
+            painter.setClipRect(option.rect)
+            bold_font = QFont(option.font)
+            bold_font.setBold(True)
+            # 用较宽的粗体字体预留宽度，绘制始终限制在本单元格内。
+            text = QFontMetrics(bold_font).elidedText(
+                str(text), Qt.ElideRight, max(0, option.rect.width() - 8),
+            )
             # 绘制选中背景
             if option.state & QStyle.State_Selected:
                 painter.fillRect(option.rect, option.palette.highlight())
@@ -67,6 +71,7 @@ class HighlightDelegate(QStyledItemDelegate):
                 if match.start() > last_end:
                     normal_text = text[last_end:match.start()]
                     painter.setPen(text_color)
+                    painter.setFont(option.font)
                     painter.drawText(x, y, normal_text)
                     x += painter.fontMetrics().horizontalAdvance(normal_text)
 

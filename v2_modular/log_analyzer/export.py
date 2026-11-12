@@ -2,9 +2,9 @@
 
 import csv
 import html
-import json
 import os
 import re
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -19,16 +19,17 @@ def _geo_summary(geo: Optional[GeoInfo]) -> str:
     return geo.summary()
 
 
-# csv 模块的 C 实现遇到 NUL(\x00) 会抛
-#   _csv.Error: need to escape, but no escapechar set
-# 导致写到一半的文件被留在磁盘上。控制字符在 Excel 里本来也显示不出来，
-# 转成 \xNN 字面量既修了崩溃，又保住了"这里有个空字节"的攻击证据。
+# 将不可见控制字符转成可见的 \\xNN，避免电子表格丢显攻击证据。
+# 同时防止不可信日志内容在电子表格中被解释为公式。
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 
 def _sanitize_cell(value) -> str:
-    """把控制字符转成可见的 \\xNN 字面量"""
-    return _CONTROL_CHARS_RE.sub(lambda m: "\\x%02x" % ord(m.group()), str(value))
+    """控制字符可见化，并用单引号前缀阻止不可信CSV单元格被当作公式。"""
+    text = _CONTROL_CHARS_RE.sub(lambda m: "\\x%02x" % ord(m.group()), str(value))
+    if text.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")) or text.startswith(("\t", "\r", "\n")):
+        return "'" + text
+    return text
 
 
 def _esc(value) -> str:
@@ -44,28 +45,37 @@ def _atomic_open(file_path: str, encoding: str = "utf-8", newline=None):
     会留下一个看着完整、其实被截断的文件）。
     """
     target = Path(file_path)
-    tmp = target.with_name(target.name + ".part")
+    tmp = None
     try:
-        with open(tmp, "w", encoding=encoding, newline=newline) as f:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding=encoding, newline=newline,
+            dir=target.parent, prefix=f".{target.name}.", suffix=".part", delete=False,
+        ) as f:
+            tmp = Path(f.name)
             yield f
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, target)
-    except BaseException:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass  # 不让清理失败掩盖真正的导出异常。
 
 
 def export_csv(
     file_path: str,
     findings: list[Finding],
     ip_geo: Optional[dict[str, GeoInfo]] = None,
+    analysis_note: str = "",
 ) -> None:
     """导出 CSV 格式报告"""
     with _atomic_open(file_path, encoding="utf-8-sig", newline="") as f:
         writer = csv.writer(f)
         headers = ["行号", "IP", "地理位置", "风险分", "攻击类型", "命中特征", "解码后内容", "原始日志"]
+        if analysis_note:
+            headers.append("分析状态")
         writer.writerow(headers)
         for item in findings:
             geo_str = _geo_summary(ip_geo.get(item.ip)) if ip_geo else ""
@@ -78,6 +88,7 @@ def export_csv(
                 _sanitize_cell(item.matched),
                 _sanitize_cell(item.normalized),
                 _sanitize_cell(item.raw),
+                *([_sanitize_cell(analysis_note)] if analysis_note else []),
             ])
 
 
@@ -87,6 +98,7 @@ def export_txt(
     source_file: str = "",
     ip_stats: Optional[dict[str, int]] = None,
     ip_geo: Optional[dict[str, GeoInfo]] = None,
+    analysis_note: str = "",
 ) -> None:
     """导出纯文本格式报告"""
     with _atomic_open(file_path, encoding="utf-8") as f:
@@ -94,6 +106,8 @@ def export_txt(
         f.write("=" * 60 + "\n\n")
         f.write(f"生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"源文件：{source_file}\n")
+        if analysis_note:
+            f.write(f"分析状态：{analysis_note}\n")
         f.write(f"命中记录：{len(findings)}\n")
         if ip_stats:
             f.write(f"攻击IP数：{len(ip_stats)}\n")
@@ -128,6 +142,7 @@ def export_html(
     source_file: str = "",
     ip_stats: Optional[dict[str, int]] = None,
     ip_geo: Optional[dict[str, GeoInfo]] = None,
+    analysis_note: str = "",
 ) -> None:
     """导出 HTML 格式报告（带样式，适合浏览器查看）"""
     rows_html = ""
@@ -179,7 +194,7 @@ def export_html(
     tr:nth-child(even) {{ background: #172033; }}
     .score {{ text-align: center; font-weight: bold; color: #f87171; }}
     .matched {{ color: #fbbf24; }}
-    .raw {{ font-family: monospace; font-size: 12px; max-width: 400px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+    .raw {{ font-family: monospace; font-size: 12px; max-width: 400px; white-space: pre-wrap; overflow-wrap: anywhere; }}
     .meta {{ color: #94a3b8; margin-bottom: 20px; }}
 </style>
 </head>
@@ -188,6 +203,7 @@ def export_html(
 <p class="meta">
     生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}<br>
     源文件：{_esc(source_file)}<br>
+    {'分析状态：' + _esc(analysis_note) + '<br>' if analysis_note else ''}
     命中记录：{len(findings)} 条
     {f' | 攻击IP：{len(ip_stats)} 个' if ip_stats else ''}
 </p>
@@ -210,6 +226,7 @@ def export_report(
     source_file: str = "",
     ip_stats: Optional[dict[str, int]] = None,
     ip_geo: Optional[dict[str, GeoInfo]] = None,
+    analysis_note: str = "",
 ) -> None:
     """
     自动根据文件后缀选择导出格式。
@@ -217,8 +234,8 @@ def export_report(
     """
     suffix = Path(file_path).suffix.lower()
     if suffix == ".csv":
-        export_csv(file_path, findings, ip_geo)
+        export_csv(file_path, findings, ip_geo, analysis_note)
     elif suffix in (".htm", ".html"):
-        export_html(file_path, findings, source_file, ip_stats, ip_geo)
+        export_html(file_path, findings, source_file, ip_stats, ip_geo, analysis_note)
     else:
-        export_txt(file_path, findings, source_file, ip_stats, ip_geo)
+        export_txt(file_path, findings, source_file, ip_stats, ip_geo, analysis_note)
